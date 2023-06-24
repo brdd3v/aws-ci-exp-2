@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DynamoDB-Table
+      AttributeDefinitions:
+        - AttributeName: "MessageId"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "MessageId"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF
+
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sqs-queue
+      ReceiveMessageWaitTimeSeconds: 10
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: sns-topic
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF
+
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !GetAtt SQSQueue.QueueUrl
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sns.amazonaws.com
+            Action:
+              - "sqs:SendMessage"
+            Resource: !GetAtt SQSQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  - !Ref SNSTopic
+
+  Subscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      RawMessageDelivery: true
+      TopicArn: !Ref SNSTopic
+      Endpoint: !GetAtt SQSQueue.Arn
+
+  LambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "iam_for_lambda"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: "lambda_logging"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: "lambda_sqs"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "sqs:ReceiveMessage"
+                  - "sqs:DeleteMessage"
+                  - "sqs:GetQueueAttributes"
+                Resource: !GetAtt SQSQueue.Arn
+        - PolicyName: "lambda_dynamodb"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:BatchWriteItem"
+                  - "dynamodb:PutItem"
+                  - "dynamodb:UpdateItem"
+                Resource: !GetAtt Table.Arn
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "lambda-func"
+      Runtime: python3.9
+      Role: !GetAtt LambdaIAMRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          import boto3
+
+          dynamodb = boto3.resource('dynamodb', region_name="eu-central-1")
+
+
+          def handler(event, context):
+              table = dynamodb.Table('DynamoDB-Table')
+              for msg in event['Records']:
+                  try:
+                      table.put_item(
+                          Item = {
+                              'MessageId': msg['messageId'],
+                              'QueueName': msg['eventSourceARN'].split(':')[-1],
+                              'Message': msg['body']
+                          }
+                      )
+                  except Exception as e:
+                      print(e)
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF
+
+  ESMLambda:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt SQSQueue.Arn
+      FunctionName: !GetAtt LambdaFunction.Arn
+      BatchSize: 1
+      Enabled: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 14
+      Tags:
+        - Key: Env
+          Value: Dev
+        - Key: Owner
+          Value: AWSCF

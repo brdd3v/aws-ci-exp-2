@@ -1,0 +1,8 @@
+version: 0.2
+phases:
+    install:
+        command:
+            - pip3 install -r requirements2.txt
+    build:
+        commands:
+            - cfn-lint -t resources.yml
